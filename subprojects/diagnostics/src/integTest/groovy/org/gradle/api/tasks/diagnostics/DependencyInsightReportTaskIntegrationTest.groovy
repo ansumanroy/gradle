@@ -1474,4 +1474,74 @@ org:foo:$displayVersion -> $selected
 \\--- org.test:a:1.0
      \\--- compileClasspath"""
     }
+
+    @Unroll
+    def "shows selected variant details"() {
+        settingsFile << "include 'a', 'b', 'c'"
+        file('a/build.gradle') << '''
+            apply plugin: 'java-library'
+            
+            dependencies {
+                api project(':b')
+                implementation project(':c')
+            }
+        '''
+        ['b', 'c'].each {
+            file("${it}/build.gradle") << """
+                apply plugin: 'java-library'
+            """
+        }
+
+        when:
+        run "a:dependencyInsight", "--dependency", ":$expectedProject", "--configuration", configuration, '--show-variant-details'
+
+        then:
+        outputContains """project :$expectedProject
+   variant "$expectedVariant" [
+      $expectedAttributes
+   ]
+\\--- $configuration"""
+
+        where:
+        configuration      | expectedProject | expectedVariant   | expectedAttributes
+        'compileClasspath' | 'b'             | 'apiElements'     | 'org.gradle.usage = java-api (requested)'
+        'runtimeClasspath' | 'c'             | 'runtimeElements' | 'org.gradle.usage = java-runtime-jars (requested was: java-runtime)'
+    }
+
+    def "shows published variant details"() {
+        given:
+        mavenRepo.with {
+            def leaf = module('org.test', 'leaf', '1.0')
+                .withModuleMetadata()
+                .variant('api', ['org.gradle.usage': 'java-api', 'org.gradle.test': 'published attribute'])
+                .publish()
+            module('org.test', 'a', '1.0')
+                .dependsOn(leaf)
+                .publish()
+
+        }
+        FeaturePreviewsFixture.enableGradleMetadata(file("gradle.properties"))
+
+        file("build.gradle") << """
+            apply plugin: 'java-library'
+            
+            repositories {
+               maven { url "${mavenRepo.uri}" }
+            }
+            
+            dependencies {
+                implementation 'org.test:a:1.0'
+            }
+            
+            configurations.compileClasspath.attributes.attribute(Attribute.of('org.gradle.blah', String), 'something')
+        """
+
+        when:
+        run "dependencyInsight", "--dependency", "leaf", "--show-variant-details"
+
+        then:
+        output.contains """org.test:leaf:1.0 (first reason)
+\\--- org.test:a:1.0
+     \\--- compileClasspath"""
+    }
 }

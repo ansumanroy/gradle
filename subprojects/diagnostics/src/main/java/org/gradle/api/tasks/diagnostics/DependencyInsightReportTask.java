@@ -16,6 +16,7 @@
 
 package org.gradle.api.tasks.diagnostics;
 
+import com.google.common.collect.Sets;
 import org.apache.commons.lang.StringUtils;
 import org.gradle.api.Action;
 import org.gradle.api.DefaultTask;
@@ -24,9 +25,12 @@ import org.gradle.api.InvalidUserDataException;
 import org.gradle.api.artifacts.Configuration;
 import org.gradle.api.artifacts.result.DependencyResult;
 import org.gradle.api.artifacts.result.ResolutionResult;
+import org.gradle.api.artifacts.result.ResolvedVariantResult;
+import org.gradle.api.attributes.Attribute;
+import org.gradle.api.attributes.AttributeContainer;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.VersionComparator;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.VersionSelectorScheme;
-import org.gradle.api.tasks.options.Option;
+import org.gradle.api.internal.attributes.AttributeContainerInternal;
 import org.gradle.api.specs.Spec;
 import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.TaskAction;
@@ -36,6 +40,7 @@ import org.gradle.api.tasks.diagnostics.internal.graph.LegendRenderer;
 import org.gradle.api.tasks.diagnostics.internal.graph.NodeRenderer;
 import org.gradle.api.tasks.diagnostics.internal.graph.nodes.RenderableDependency;
 import org.gradle.api.tasks.diagnostics.internal.insight.DependencyInsightReporter;
+import org.gradle.api.tasks.options.Option;
 import org.gradle.internal.graph.GraphRenderer;
 import org.gradle.internal.logging.text.StyledTextOutput;
 import org.gradle.internal.logging.text.StyledTextOutputFactory;
@@ -51,10 +56,10 @@ import static org.gradle.internal.logging.text.StyledTextOutput.Style.*;
 /**
  * Generates a report that attempts to answer questions like:
  * <ul>
- *  <li>Why is this dependency in the dependency graph?</li>
- *  <li>Exactly which dependencies are pulling this dependency into the graph?</li>
- *  <li>What is the actual version (i.e. *selected* version) of the dependency that will be used? Is it the same as what was *requested*?</li>
- *  <li>Why is the *selected* version of a dependency different to the *requested*?</li>
+ * <li>Why is this dependency in the dependency graph?</li>
+ * <li>Exactly which dependencies are pulling this dependency into the graph?</li>
+ * <li>What is the actual version (i.e. *selected* version) of the dependency that will be used? Is it the same as what was *requested*?</li>
+ * <li>Why is the *selected* version of a dependency different to the *requested*?</li>
  * </ul>
  *
  * Use this task to get insight into a particular dependency (or dependencies)
@@ -79,6 +84,7 @@ import static org.gradle.internal.logging.text.StyledTextOutput.Style.*;
 public class DependencyInsightReportTask extends DefaultTask {
 
     private Configuration configuration;
+    private boolean showVariantDetails;
     private Spec<DependencyResult> dependencySpec;
 
     /**
@@ -113,6 +119,31 @@ public class DependencyInsightReportTask extends DefaultTask {
         this.dependencySpec = parser.parseNotation(dependencyInsightNotation);
     }
 
+    /**
+     * Configures the report to show variant matching details. When this flag is set to true, the report will also
+     * display the variant details, in particular variant attributes and how they were matched.
+     *
+     * <p>
+     * This method is exposed to the command line interface. Example usage:
+     * <pre>gradle dependencyInsight --configuration compileClasspath --dependency slf4j --variant-details</pre>
+     * </p>
+     *
+     * @param showDetails if set to true, display selected variant details
+     */
+    @Option(option = "show-variant-details", description = "Shows the details of variant matching")
+    public void setShowVariantDetails(boolean showDetails) {
+        this.showVariantDetails = showDetails;
+    }
+
+    /**
+     * Determine if variant details need to be displayed.
+     *
+     * @return true if variant details need to be displayed
+     */
+    @Internal
+    public boolean isShowVariantDetails() {
+        return showVariantDetails;
+    }
 
     /**
      * Configuration to look the dependency in
@@ -160,17 +191,17 @@ public class DependencyInsightReportTask extends DefaultTask {
         final Configuration configuration = getConfiguration();
         if (configuration == null) {
             throw new InvalidUserDataException("Dependency insight report cannot be generated because the input configuration was not specified. "
-                    + "\nIt can be specified from the command line, e.g: '" + getPath() + " --configuration someConf --dependency someDep'");
+                + "\nIt can be specified from the command line, e.g: '" + getPath() + " --configuration someConf --dependency someDep'");
         }
 
         if (dependencySpec == null) {
             throw new InvalidUserDataException("Dependency insight report cannot be generated because the dependency to show was not specified."
-                    + "\nIt can be specified from the command line, e.g: '" + getPath() + " --dependency someDep'");
+                + "\nIt can be specified from the command line, e.g: '" + getPath() + " --dependency someDep'");
         }
 
 
         StyledTextOutput output = getTextOutputFactory().create(getClass());
-        GraphRenderer renderer = new GraphRenderer(output);
+        final GraphRenderer renderer = new GraphRenderer(output);
 
         ResolutionResult result = configuration.getIncoming().getResolutionResult();
 
@@ -189,7 +220,7 @@ public class DependencyInsightReportTask extends DefaultTask {
             return;
         }
 
-        Collection<RenderableDependency> sortedDeps = new DependencyInsightReporter().prepare(selectedDependencies, getVersionSelectorScheme(), getVersionComparator());
+        Collection<RenderableDependency> sortedDeps = new DependencyInsightReporter(showVariantDetails).prepare(selectedDependencies, getVersionSelectorScheme(), getVersionComparator());
 
         NodeRenderer nodeRenderer = new NodeRenderer() {
             public void renderNode(StyledTextOutput target, RenderableDependency node, boolean alreadyRendered) {
@@ -209,11 +240,10 @@ public class DependencyInsightReportTask extends DefaultTask {
             renderer.visit(new Action<StyledTextOutput>() {
                 public void execute(StyledTextOutput out) {
                     out.withStyle(Identifier).text(dependency.getName());
-
                     if (StringUtils.isNotEmpty(dependency.getDescription())) {
                         out.withStyle(Description).text(" (" + dependency.getDescription() + ")");
                     }
-
+                    printVariantDetails(out);
                     switch (dependency.getResolutionState()) {
                         case FAILED:
                             out.withStyle(Failure).text(" FAILED");
@@ -227,6 +257,65 @@ public class DependencyInsightReportTask extends DefaultTask {
 
                 }
 
+                private void printVariantDetails(StyledTextOutput out) {
+                    ResolvedVariantResult resolvedVariant = dependency.getResolvedVariant();
+                    if (resolvedVariant != null && showVariantDetails) {
+                        out.println();
+                        out.withStyle(Description).text("   variant \"" + resolvedVariant.getDisplayName() + "\"");
+                        AttributeContainer attributes = resolvedVariant.getAttributes();
+                        if (!attributes.isEmpty()) {
+                            out.withStyle(Description).text(" [");
+                            out.println();
+                            AttributeContainerInternal requested = (AttributeContainerInternal) configuration.getAttributes();
+                            int maxAttributeLen = computeAttributePadding(attributes, requested);
+                            Set<Attribute<?>> matchedAttributes = Sets.newLinkedHashSet();
+                            for (Attribute<?> attribute : attributes.keySet()) {
+                                Object actualValue = attributes.getAttribute(attribute);
+                                AttributeMatchDetails match = match(attribute, actualValue, requested);
+                                out.withStyle(Description).text("      " + StringUtils.rightPad(attribute.getName(), maxAttributeLen) + " = " + actualValue);
+                                Attribute<?> requestedAttribute = match.requested;
+                                if (requestedAttribute != null) {
+                                    matchedAttributes.add(requestedAttribute);
+                                }
+                                switch (match.match) {
+                                    case requested:
+                                        out.withStyle(Info).text(" (requested)");
+                                        break;
+                                    case different_value:
+                                        out.withStyle(Info).text(" (requested was: " + match.requestedValue + ")");
+                                        break;
+                                    case not_requested:
+                                        out.withStyle(Info).text(" (not requested)");
+                                        break;
+                                }
+                                out.println();
+                            }
+                            Sets.SetView<Attribute<?>> missing = Sets.difference(requested.keySet(), matchedAttributes);
+                            if (!missing.isEmpty()) {
+                                out.println();
+                                out.withStyle(Description).text("      Requested attributes not found in the selected variant:");
+                                out.println();
+                                for (Attribute<?> missingAttribute : missing) {
+                                    out.withStyle(Description).text("         " + StringUtils.rightPad(missingAttribute.getName(), maxAttributeLen) + " = " + requested.getAttribute(missingAttribute));
+                                    out.println();
+                                }
+                            }
+                            out.withStyle(Description).text("   ]");
+                        }
+                    }
+                }
+
+                private int computeAttributePadding(AttributeContainer attributes, AttributeContainerInternal requested) {
+                    int maxAttributeLen = 0;
+                    for (Attribute<?> attribute : requested.keySet()) {
+                        maxAttributeLen = Math.max(maxAttributeLen, attribute.getName().length());
+                    }
+                    for (Attribute<?> attribute : attributes.keySet()) {
+                        maxAttributeLen = Math.max(maxAttributeLen, attribute.getName().length());
+                    }
+                    return maxAttributeLen;
+                }
+
             }, true);
             dependencyGraphRenderer.render(dependency);
             boolean last = i++ == sortedDeps.size();
@@ -238,5 +327,49 @@ public class DependencyInsightReportTask extends DefaultTask {
 
 
         legendRenderer.printLegend();
+    }
+
+    private static AttributeMatchDetails match(Attribute<?> actualAttribute, Object actualValue, AttributeContainerInternal requestedAttributes) {
+        for (Attribute<?> requested : requestedAttributes.keySet()) {
+            Object requestedValue = requestedAttributes.getAttribute(requested);
+            if (requested.getName().equals(actualAttribute.getName())) {
+                // found an attribute with the same name, but they do not necessarily have the same type
+                if (requested.equals(actualAttribute)) {
+                    if (actualValue.equals(requestedValue)) {
+                        return new AttributeMatchDetails(AttributeMatch.requested, requested, requested, requestedValue, actualValue);
+                    }
+                    return new AttributeMatchDetails(AttributeMatch.different_value, requested, requested, requestedValue, actualValue);
+                } else {
+                    // maybe through coercion
+                    if (actualValue.toString().equals(requestedValue.toString())) {
+                        return new AttributeMatchDetails(AttributeMatch.requested, requested, actualAttribute, requestedValue, actualValue);
+                    }
+                    return new AttributeMatchDetails(AttributeMatch.different_value, requested, actualAttribute, requestedValue, actualValue);
+                }
+            }
+        }
+        return new AttributeMatchDetails(AttributeMatch.not_requested, null, actualAttribute, null, actualValue);
+    }
+
+    private static class AttributeMatchDetails {
+        private final AttributeMatch match;
+        private final Attribute<?> requested;
+        private final Attribute<?> actual;
+        private final Object requestedValue;
+        private final Object actualValue;
+
+        private AttributeMatchDetails(AttributeMatch match, Attribute<?> requested, Attribute<?> actual, Object requestedValue, Object actualValue) {
+            this.match = match;
+            this.requested = requested;
+            this.actual = actual;
+            this.requestedValue = requestedValue;
+            this.actualValue = actualValue;
+        }
+    }
+
+    private enum AttributeMatch {
+        requested,
+        different_value,
+        not_requested
     }
 }

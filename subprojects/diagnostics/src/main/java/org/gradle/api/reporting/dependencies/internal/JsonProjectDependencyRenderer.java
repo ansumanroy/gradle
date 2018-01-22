@@ -262,7 +262,7 @@ public class JsonProjectDependencyRenderer {
             }
         });
 
-        Collection<RenderableDependency> sortedDeps = new DependencyInsightReporter().prepare(selectedDependencies, versionSelectorScheme, versionComparator);
+        Collection<RenderableDependency> sortedDeps = new DependencyInsightReporter(false).prepare(selectedDependencies, versionSelectorScheme, versionComparator);
         return CollectionUtils.collect(sortedDeps, new Transformer<Object, RenderableDependency>() {
             @Override
             public Object transform(RenderableDependency dependency) {

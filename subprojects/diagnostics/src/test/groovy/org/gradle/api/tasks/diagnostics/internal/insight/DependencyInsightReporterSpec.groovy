@@ -41,7 +41,7 @@ class DependencyInsightReporterSpec extends Specification {
         def dependencies = [dep("a", "x", "1.0", "2.0"), dep("a", "x", "1.5", "2.0"), dep("b", "a", "5.0"), dep("a", "z", "1.0"), dep("a", "x", "2.0")]
 
         when:
-        def sorted = new DependencyInsightReporter().prepare(dependencies, versionSelectorScheme, versionComparator);
+        def sorted = new DependencyInsightReporter(showVariantDetails).prepare(dependencies, versionSelectorScheme, versionComparator);
 
         then:
         sorted.size() == 5
@@ -66,7 +66,7 @@ class DependencyInsightReporterSpec extends Specification {
         def dependencies = [dep("a", "x", "1.0", "2.0", forced()), dep("a", "x", "1.5", "2.0", forced()), dep("b", "a", "5.0")]
 
         when:
-        def sorted = new DependencyInsightReporter().prepare(dependencies, versionSelectorScheme, versionComparator);
+        def sorted = new DependencyInsightReporter(showVariantDetails).prepare(dependencies, versionSelectorScheme, versionComparator);
 
         then:
         sorted.size() == 4
@@ -88,7 +88,7 @@ class DependencyInsightReporterSpec extends Specification {
         def dependencies = [dep("a", "x", "1.0", "2.0", conflict()), dep("a", "x", "2.0", "2.0", conflict()), dep("b", "a", "5.0", "5.0", forced())]
 
         when:
-        def sorted = new DependencyInsightReporter().prepare(dependencies, versionSelectorScheme, versionComparator);
+        def sorted = new DependencyInsightReporter(showVariantDetails).prepare(dependencies, versionSelectorScheme, versionComparator);
 
         then:
         sorted.size() == 3
